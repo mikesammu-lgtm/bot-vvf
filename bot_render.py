@@ -3,7 +3,7 @@ from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
-TELEGRAM_TOKEN = "8731559080:AAGGTxLogJIrQbGbNpY0_DMX854lu3fDp-0"
+TELEGRAM_TOKEN = "8731559080:AAEQL5ZzYj_mzlpqxABcHH5MyZ0n1mTQqw8"
 ARCGIS_URL = "https://services3.arcgis.com/MfVi0khS4tCyLmo3/arcgis/rest/services/Interventi_VVF_Assegnati_-_Ultime_6_ore/FeatureServer/0/query"
 TOKEN_URL = "https://www.arcgis.com/sharing/rest/generateToken"
 USERS_FILE = "users.json"
@@ -16,7 +16,7 @@ arcgis_token_exp = 0
 flask_app = Flask(__name__)
 @flask_app.route('/')
 def home():
-    return f"Bot VVF V6 - {len(users)} utenti"
+    return f"Bot VVF V7 FINAL - {len(users)} utenti"
 def run_flask():
     flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
@@ -36,7 +36,6 @@ def load_users():
                 data = json.load(f)
                 for k,v in data.items():
                     users[int(k)] = {"lat": v["lat"], "lon": v["lon"], "radius": v.get("radius",30000), "seen": set()}
-            print(f"Caricati {len(users)} utenti")
         except Exception as e:
             print(f"load err {e}")
 
@@ -57,7 +56,6 @@ def get_arcgis_token():
     try:
         data = {"f": "json", "referer": "https://www.arcgis.com", "expiration": "60"}
         r = requests.post(TOKEN_URL, data=data, timeout=10)
-        print(f"TOKEN status={r.status_code} {r.text[:500]}")
         j = r.json()
         tok = j.get("token")
         if tok:
@@ -76,7 +74,7 @@ def query_all():
     try:
         r = requests.get(ARCGIS_URL, params=params, timeout=20)
         print(f"ArcGIS RAW status={r.status_code} len={len(r.text)}")
-        print(f"ArcGIS RAW preview={r.text[:800]}")
+        print(f"ArcGIS RAW preview={r.text[:600]}")
         j = r.json()
         feats = j.get("features",[])
         print(f"ArcGIS ALL -> {len(feats)} interventi")
@@ -165,7 +163,7 @@ async def stato_cmd(update, context):
         return
     result = await asyncio.to_thread(query_all)
     feats, status, err = result
-    txt=f"DEBUG V6\nHTTP: {status}\nErr: {err}\nTot Piemonte: {len(feats)}"
+    txt=f"DEBUG V7\nHTTP: {status}\nErr: {err}\nTot Piemonte: {len(feats)}"
     if feats:
         f=feats[0]
         attr=f.get("attributes",{})
@@ -173,7 +171,7 @@ async def stato_cmd(update, context):
     await update.message.reply_text(txt)
 
 async def start_cmd(update, context):
-    await update.message.reply_text("Bot VVF V6 - /stato per debug", reply_markup=get_keyboard())
+    await update.message.reply_text("Bot VVF V7 FINAL - /stato per debug", reply_markup=get_keyboard())
 
 async def raggio_cb(update, context):
     q=update.callback_query
@@ -205,8 +203,9 @@ async def post_init(app):
     global app_ref
     try:
         await app.bot.delete_webhook(drop_pending_updates=True)
-    except:
-        pass
+        print("Webhook deleted")
+    except Exception as e:
+        print(f"del webhook err {e}")
     app_ref=app
     asyncio.create_task(background_loop())
 
@@ -221,7 +220,7 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, handle_loc))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, handle_loc))
     app.add_handler(CallbackQueryHandler(raggio_cb, pattern="^raggio_"))
-    print(f"Avviato V6 - {len(users)} utenti")
+    print(f"Avviato V7 FINAL - {len(users)} utenti token {TELEGRAM_TOKEN[:6]}...")
     app.run_polling(drop_pending_updates=True, allowed_updates=["message","edited_message","callback_query"])
 
 if __name__=="__main__":
