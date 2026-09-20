@@ -5,7 +5,7 @@ from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
-TELEGRAM_TOKEN = "8731559080:AAGEeCrhmyG0JHBF2RU8CKnRhg-zwtSlhAQ"
+TELEGRAM_TOKEN = "8731559080:AAGGTxLogJIrQbGbNpY0_DMX854lu3fDp-0"
 ARCGIS_URL = "https://services3.arcgis.com/MfVi0khS4tCyLmo3/arcgis/rest/services/Interventi_VVF_Assegnati_-_Ultime_6_ore/FeatureServer/0/query"
 USERS_FILE = "users.json"
 
