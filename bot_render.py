@@ -1,5 +1,5 @@
 
-import asyncio, json, os, requests, threading, math
+import asyncio, json, os, requests, threading, math, html
 from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters
@@ -13,7 +13,7 @@ app_ref = None
 
 flask_app = Flask(__name__)
 @flask_app.route('/')
-def home(): return f"Bot VVF V4 DEBUG - {len(users)} utenti - debug attivo"
+def home(): return f"Bot VVF V5 FIX MARKDOWN - {len(users)} utenti"
 def run_flask(): flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 def save_users():
@@ -42,14 +42,11 @@ def query_all():
     params = {"f":"json","where":"1=1","outFields":"*","returnGeometry":"true","orderByFields":"OBJECTID DESC","resultRecordCount":100}
     try:
         r = requests.get(ARCGIS_URL, params=params, timeout=20)
-        # --- 2 RIGHE DEBUG RICHIESTE ---
         print(f"ArcGIS RAW status={r.status_code} len={len(r.text)}")
         print(f"ArcGIS RAW preview={r.text[:800]}")
-        # --------------------------------
         j = r.json()
         feats = j.get("features",[])
-        if "error" in j:
-            print(f"ArcGIS ERROR JSON: {j['error']}")
+        if "error" in j: print(f"ArcGIS ERROR JSON: {j['error']}")
         print(f"ArcGIS ALL -> {len(feats)} interventi")
         return feats, r.status_code, j.get("error")
     except Exception as e:
@@ -86,13 +83,14 @@ async def check_all_users():
                 oid=feat["attributes"].get("OBJECTID")
                 if oid in u["seen"]: continue
                 u["seen"].add(oid)
-                attr=feat.get("attributes",{}); tip=attr.get("TIPOLOGIA") or "VVF"; sotto=attr.get("SOTTOTIPOLOGIA") or ""; comune=attr.get("COMUNE") or ""; indir=attr.get("INDIRIZZO") or ""; data=attr.get("DATA_SEGNALAZIONE") or ""; data_str=str(data)[:16] if data else ""
+                attr=feat.get("attributes",{}); tip=str(attr.get("TIPOLOGIA") or "VVF"); sotto=str(attr.get("SOTTOTIPOLOGIA") or ""); comune=str(attr.get("COMUNE") or ""); indir=str(attr.get("INDIRIZZO") or ""); data=str(attr.get("DATA_SEGNALAZIONE") or "")[:16]
                 lat=feat.get("geometry",{}).get("y"); lon=feat.get("geometry",{}).get("x")
                 dist_txt=f"{dist/1000:.1f}km" if dist>=1000 else f"{int(dist)}m"
                 maps_url=f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
-                msg=f"🚨 *NUOVO VVF!* 🚒\n📋 *{tip}* {sotto}\n📍 *{comune}* {indir}\n🕐 {data_str}\n📏 {dist_txt} entro {int(u['radius']/1000)}km"
+                # Messaggio SENZA markdown rischioso, uso HTML safe
+                msg=f"🚨 NUOVO VVF!\n{tip} {sotto}\n{comune} {indir}\n{data}\n{dist_txt} entro {int(u['radius']/1000)}km"
                 kb=InlineKeyboardMarkup([[InlineKeyboardButton("🚨 Maps", url=maps_url)]])
-                await app_ref.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown", reply_markup=kb)
+                await app_ref.bot.send_message(chat_id=chat_id, text=msg, reply_markup=kb)
         except Exception as e: print(f"check err {e}")
 
 async def background_loop():
@@ -116,10 +114,9 @@ async def handle_loc(update, context):
 async def show_vicini(update, context, silent=True):
     chat_id = update.effective_chat.id
     u = users.get(chat_id)
-    if not u:
-        return
+    if not u: return
     result = await asyncio.to_thread(query_all)
-    feats = result[0] if isinstance(result, tuple) else result
+    feats = result[0]
     vicini=[]
     for f in feats:
         g=f.get("geometry",{}); lat=g.get("y"); lon=g.get("x")
@@ -129,36 +126,40 @@ async def show_vicini(update, context, silent=True):
     vicini.sort(key=lambda x: x[0])
     if not vicini:
         txt=f"👀 Nessun intervento entro {int(u['radius']/1000)}km ultime 6h. Tot Piemonte: {len(feats)}"
-        if update.callback_query: await update.callback_query.edit_message_text(txt, reply_markup=get_keyboard())
+        if update.callback_query: 
+            try: await update.callback_query.edit_message_text(txt, reply_markup=get_keyboard())
+            except: await context.bot.send_message(chat_id=chat_id, text=txt, reply_markup=get_keyboard())
         else: await context.bot.send_message(chat_id=chat_id, text=txt, reply_markup=get_keyboard())
         return
     for d,f in vicini[:5]:
-        attr=f.get("attributes",{}); tip=attr.get("TIPOLOGIA") or "VVF"; sotto=attr.get("SOTTOTIPOLOGIA") or ""; comune=attr.get("COMUNE") or ""; indir=attr.get("INDIRIZZO") or ""; data=attr.get("DATA_SEGNALAZIONE") or ""
+        attr=f.get("attributes",{}); tip=str(attr.get("TIPOLOGIA") or "VVF"); sotto=str(attr.get("SOTTOTIPOLOGIA") or ""); comune=str(attr.get("COMUNE") or ""); indir=str(attr.get("INDIRIZZO") or ""); data=str(attr.get("DATA_SEGNALAZIONE") or "")[:16]
         lat=f.get("geometry",{}).get("y"); lon=f.get("geometry",{}).get("x")
         maps_url=f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
-        msg=f"👀 *Vicino ORA* {d/1000:.1f}km\n📋 {tip} {sotto}\n📍 {comune} {indir}\n🕐 {str(data)[:16]}"
-        await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚨 Maps", url=maps_url)]]))
+        msg=f"👀 Vicino ORA {d/1000:.1f}km\n{tip} {sotto}\n{comune} {indir}\n{data}"
+        await context.bot.send_message(chat_id=chat_id, text=msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚨 Maps", url=maps_url)]]))
 
 async def start_cmd(update, context):
-    await update.message.reply_text("🚒 *Bot VVF V4 DEBUG*\n/vicini - vedi ora\n/test - test\n/stato - debug con ArcGIS RAW", parse_mode="Markdown", reply_markup=get_keyboard())
+    await update.message.reply_text("🚒 Bot VVF V5 FIX - niente piu errori markdown\n/vicini - vedi ora\n/stato - debug\n/test - test", reply_markup=get_keyboard())
 
 async def stato_cmd(update, context):
     u=users.get(update.effective_chat.id)
-    if not u: await update.message.reply_text("Non registrato"); return
+    if not u: await update.message.reply_text("Non registrato. Invia posizione Live."); return
     result = await asyncio.to_thread(query_all)
     feats, status, err = result
     vicini=sum(1 for f in feats if f.get("geometry",{}).get("y") and haversine(u["lat"], u["lon"], f["geometry"]["y"], f["geometry"]["x"]) <= u["radius"])
-    txt=f"📊 *DEBUG V4*\nHTTP: {status}\nErr: {err}\nTot 6h Piemonte: {len(feats)}\nEntro {int(u['radius']/1000)}km: {vicini}\nVisti: {len(u['seen'])}"
+    # NIENTE MARKDOWN QUI - testo semplice
+    txt=f"DEBUG V5\nHTTP: {status}\nErr: {err}\nTot 6h Piemonte: {len(feats)}\nEntro {int(u['radius']/1000)}km: {vicini}\nVisti: {len(u['seen'])}"
     if feats:
         f=feats[0]; attr=f.get("attributes",{})
         txt+=f"\n\nUltimo: {attr.get('COMUNE')} {attr.get('TIPOLOGIA')} {str(attr.get('DATA_SEGNALAZIONE'))[:16]}"
-    await update.message.reply_text(txt, parse_mode="Markdown")
+    # Invio SENZA parse_mode per evitare BadRequest
+    await update.message.reply_text(txt)
 
 async def test_cmd(update, context):
     chat_id=update.effective_chat.id
     u=users.get(chat_id)
     if not u: await update.message.reply_text("Prima LIVE"); return
-    await context.bot.send_message(chat_id=chat_id, text=f"🧪 TEST OK raggio {int(u['radius']/1000)}km!", reply_markup=get_keyboard())
+    await context.bot.send_message(chat_id=chat_id, text=f"TEST OK raggio {int(u['radius']/1000)}km!", reply_markup=get_keyboard())
 
 async def raggio_cb(update, context):
     q=update.callback_query
@@ -169,10 +170,16 @@ async def raggio_cb(update, context):
     if data=="raggio_vicini": await show_vicini(update, context, False); return
     if data=="raggio_stop":
         if chat_id in users: del users[chat_id]; save_users()
-        await q.edit_message_text("🔇 Stop"); return
-    if chat_id not in users: await q.edit_message_text("Prima LIVE!"); return
+        try: await q.edit_message_text("Stop")
+        except: pass
+        return
+    if chat_id not in users: 
+        try: await q.edit_message_text("Prima LIVE!")
+        except: pass
+        return
     km=int(data.split("_")[1]); users[chat_id]["radius"]=km*1000; save_users()
-    await q.edit_message_text(f"✅ Raggio {km}km! Cerco...", reply_markup=get_keyboard())
+    try: await q.edit_message_text(f"Raggio {km}km! Cerco...", reply_markup=get_keyboard())
+    except: pass
     await show_vicini(update, context, False)
 
 async def post_init(app):
@@ -193,7 +200,7 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, handle_loc))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, handle_loc))
     app.add_handler(CallbackQueryHandler(raggio_cb, pattern="^raggio_"))
-    print(f"Avviato V4 DEBUG - {len(users)} utenti")
+    print(f"Avviato V5 FIX MARKDOWN - {len(users)} utenti")
     app.run_polling(drop_pending_updates=True, allowed_updates=["message","edited_message","callback_query"])
 
 if __name__=="__main__": main()
