@@ -13,7 +13,7 @@ app_ref = None
 
 flask_app = Flask(__name__)
 @flask_app.route('/')
-def home(): return f"Bot VVF V3 FINAL - {len(users)} utenti"
+def home(): return f"Bot VVF V4 DEBUG - {len(users)} utenti - debug attivo"
 def run_flask(): flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 def save_users():
@@ -42,11 +42,19 @@ def query_all():
     params = {"f":"json","where":"1=1","outFields":"*","returnGeometry":"true","orderByFields":"OBJECTID DESC","resultRecordCount":100}
     try:
         r = requests.get(ARCGIS_URL, params=params, timeout=20)
-        feats = r.json().get("features",[])
+        # --- 2 RIGHE DEBUG RICHIESTE ---
+        print(f"ArcGIS RAW status={r.status_code} len={len(r.text)}")
+        print(f"ArcGIS RAW preview={r.text[:800]}")
+        # --------------------------------
+        j = r.json()
+        feats = j.get("features",[])
+        if "error" in j:
+            print(f"ArcGIS ERROR JSON: {j['error']}")
         print(f"ArcGIS ALL -> {len(feats)} interventi")
-        return feats
+        return feats, r.status_code, j.get("error")
     except Exception as e:
-        print(f"ArcGIS err {e}"); return []
+        print(f"ArcGIS err {e}")
+        return [], 0, str(e)
 
 def get_keyboard():
     return InlineKeyboardMarkup([
@@ -58,7 +66,8 @@ def get_keyboard():
 
 async def check_all_users():
     if not app_ref: return
-    all_feats = await asyncio.to_thread(query_all)
+    result = await asyncio.to_thread(query_all)
+    all_feats = result[0] if isinstance(result, tuple) else result
     if not all_feats: return
     for chat_id, u in list(users.items()):
         try:
@@ -108,9 +117,9 @@ async def show_vicini(update, context, silent=True):
     chat_id = update.effective_chat.id
     u = users.get(chat_id)
     if not u:
-        if not silent: await (update.message or context.bot.send_message)(chat_id=chat_id, text="Prima LIVE!")
         return
-    feats = await asyncio.to_thread(query_all)
+    result = await asyncio.to_thread(query_all)
+    feats = result[0] if isinstance(result, tuple) else result
     vicini=[]
     for f in feats:
         g=f.get("geometry",{}); lat=g.get("y"); lon=g.get("x")
@@ -131,14 +140,19 @@ async def show_vicini(update, context, silent=True):
         await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚨 Maps", url=maps_url)]]))
 
 async def start_cmd(update, context):
-    await update.message.reply_text("🚒 *Bot VVF V3 FINAL - FIX CONFLICT*\n/vicini - vedi ora\n/test - test\n/stato - debug", parse_mode="Markdown", reply_markup=get_keyboard())
+    await update.message.reply_text("🚒 *Bot VVF V4 DEBUG*\n/vicini - vedi ora\n/test - test\n/stato - debug con ArcGIS RAW", parse_mode="Markdown", reply_markup=get_keyboard())
 
 async def stato_cmd(update, context):
     u=users.get(update.effective_chat.id)
     if not u: await update.message.reply_text("Non registrato"); return
-    feats=await asyncio.to_thread(query_all)
+    result = await asyncio.to_thread(query_all)
+    feats, status, err = result
     vicini=sum(1 for f in feats if f.get("geometry",{}).get("y") and haversine(u["lat"], u["lon"], f["geometry"]["y"], f["geometry"]["x"]) <= u["radius"])
-    await update.message.reply_text(f"📊 Tot 6h Piemonte: {len(feats)}\nEntro {int(u['radius']/1000)}km: {vicini}\nVisti: {len(u['seen'])}")
+    txt=f"📊 *DEBUG V4*\nHTTP: {status}\nErr: {err}\nTot 6h Piemonte: {len(feats)}\nEntro {int(u['radius']/1000)}km: {vicini}\nVisti: {len(u['seen'])}"
+    if feats:
+        f=feats[0]; attr=f.get("attributes",{})
+        txt+=f"\n\nUltimo: {attr.get('COMUNE')} {attr.get('TIPOLOGIA')} {str(attr.get('DATA_SEGNALAZIONE'))[:16]}"
+    await update.message.reply_text(txt, parse_mode="Markdown")
 
 async def test_cmd(update, context):
     chat_id=update.effective_chat.id
@@ -179,7 +193,7 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, handle_loc))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, handle_loc))
     app.add_handler(CallbackQueryHandler(raggio_cb, pattern="^raggio_"))
-    print(f"Avviato V3 FINAL TOKEN NUOVO - {len(users)} utenti")
+    print(f"Avviato V4 DEBUG - {len(users)} utenti")
     app.run_polling(drop_pending_updates=True, allowed_updates=["message","edited_message","callback_query"])
 
 if __name__=="__main__": main()
