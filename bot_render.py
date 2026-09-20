@@ -1,4 +1,3 @@
-
 import asyncio, json, os, requests, threading, math, logging
 from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,7 +19,7 @@ flask_app = Flask(__name__)
 @flask_app.route('/')
 def home():
     u = os.environ.get("ARCGIS_USER", "non impostato")
-    return f"Bot VVF V8.1 SERVER - {len(users)} utenti - User:{u}"
+    return f"Bot VVF V8.2 OAUTH - {len(users)} utenti - User:{u} - OK"
 
 def run_flask():
     flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
@@ -66,40 +65,54 @@ def get_arcgis_token():
     if not username or not password:
         print("ERRORE: ARCGIS_USER / ARCGIS_PASS non impostate!")
         return None
-    
-    # 3 endpoint diversi, prova tutti
-    endpoints = [
-        ("SERVER tokens", "https://services3.arcgis.com/MfVi0khS4tCyLmo3/arcgis/tokens/generateToken"),
-        ("SERVER rest", "https://services3.arcgis.com/MfVi0khS4tCyLmo3/arcgis/rest/generateToken"),
-        ("AGOL", "https://www.arcgis.com/sharing/rest/generateToken")
-    ]
-    
-    for name, url in endpoints:
-        try:
-            print(f"Provo {name} -> {url} con user={username}")
-            data = {
-                "f": "json",
-                "username": username,
-                "password": password,
-                "client": "referer",
-                "referer": "https://www.arcgis.com",
-                "expiration": "120",
-                "format": "json"
-            }
-            r = requests.post(url, data=data, timeout=15)
-            print(f"{name} status={r.status_code} body={r.text[:1500]}")
-            j = r.json()
-            if "token" in j and j["token"]:
-                arcgis_token = j["token"]
-                arcgis_token_exp = time.time() + 110*60
-                print(f"{name} OK! token len={len(arcgis_token)}")
-                return arcgis_token
-            if "error" in j:
-                print(f"{name} ERROR={j['error']}")
-        except Exception as e:
-            print(f"{name} exception {e}")
-    
-    print("Tutti gli endpoint token falliti")
+
+    # METODO 1: OAUTH2 (quello che usa arcgis.com quando fai login da browser)
+    try:
+        print(f"Provo OAUTH2 arcgisonline -> user={username}")
+        data = {
+            "f": "json",
+            "client_id": "arcgisonline",
+            "grant_type": "password",
+            "username": username,
+            "password": password,
+            "expiration": "20160"
+        }
+        r = requests.post("https://www.arcgis.com/sharing/rest/oauth2/token", data=data, timeout=15)
+        print(f"OAUTH2 status={r.status_code} body={r.text[:2000]}")
+        j = r.json()
+        if "access_token" in j:
+            arcgis_token = j["access_token"]
+            arcgis_token_exp = time.time() + 110*60
+            print(f"OAUTH2 OK! token len={len(arcgis_token)}")
+            return arcgis_token
+        if "error" in j:
+            print(f"OAUTH2 ERROR={j}")
+    except Exception as e:
+        print(f"OAUTH2 exception {e}")
+
+    # METODO 2: generateToken classico con client=referer
+    try:
+        print(f"Provo generateToken classico -> user={username}")
+        data = {
+            "f": "json",
+            "username": username,
+            "password": password,
+            "client": "referer",
+            "referer": "https://www.arcgis.com",
+            "expiration": "120"
+        }
+        r = requests.post("https://www.arcgis.com/sharing/rest/generateToken", data=data, timeout=15)
+        print(f"generateToken status={r.status_code} body={r.text[:2000]}")
+        j = r.json()
+        if "token" in j:
+            arcgis_token = j["token"]
+            arcgis_token_exp = time.time() + 110*60
+            print(f"generateToken OK! token len={len(arcgis_token)}")
+            return arcgis_token
+    except Exception as e:
+        print(f"generateToken exception {e}")
+
+    print("Tutti i metodi token falliti")
     return None
 
 def query_all():
@@ -109,7 +122,7 @@ def query_all():
         params["token"] = tok
     try:
         r = requests.get(ARCGIS_URL, params=params, timeout=20)
-        print(f"ArcGIS query status={r.status_code} len={len(r.text)} preview={r.text[:1000]}")
+        print(f"ArcGIS query status={r.status_code} len={len(r.text)} preview={r.text[:1200]}")
         j = r.json()
         if "error" in j:
             return [], r.status_code, j["error"]
@@ -198,16 +211,16 @@ async def stato_cmd(update, context):
     feats, status, err = result
     username = os.environ.get("ARCGIS_USER", "???")
     if err:
-        txt=f"❌ ERRORE 499 anche con credenziali {username}\n\nHTTP: {status}\n{err}\n\nControlla i LOG su Render per vedere il dettaglio del login."
+        txt=f"❌ ERRORE 499 User {username}\nHTTP: {status}\n{err}\n\nGuarda i LOG su Render per il dettaglio OAUTH2."
     else:
-        txt=f"✅ V8.1 OK! User: {username}\nTot Piemonte 6h: {len(feats)}\nHTTP: {status}"
+        txt=f"✅ V8.2 OAUTH OK! User: {username}\nTot Piemonte 6h: {len(feats)}\nHTTP: {status}"
         if feats:
             a=feats[0].get("attributes",{})
             txt+=f"\nUltimo: {a.get('COMUNE')} {a.get('TIPOLOGIA')}"
     await update.message.reply_text(txt)
 
 async def start_cmd(update, context):
-    await update.message.reply_text("🤖 Bot VVF V8.1 SERVER - /stato per debug", reply_markup=get_keyboard())
+    await update.message.reply_text("🤖 Bot VVF V8.2 OAUTH - /stato per debug", reply_markup=get_keyboard())
 
 async def vicini_cmd(update, context):
     chat_id=update.effective_chat.id
@@ -299,7 +312,7 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, handle_loc))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, handle_loc))
     app.add_handler(CallbackQueryHandler(raggio_cb, pattern="^raggio_"))
-    print(f"Avviato V8.1 SERVER - {len(users)} utenti token {TELEGRAM_TOKEN[:6]}...")
+    print(f"Avviato V8.2 OAUTH - {len(users)} utenti token {TELEGRAM_TOKEN[:6]}...")
     app.run_polling(drop_pending_updates=True, allowed_updates=["message","edited_message","callback_query"])
 
 if __name__=="__main__":
