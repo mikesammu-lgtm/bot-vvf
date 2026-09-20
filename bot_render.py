@@ -8,20 +8,20 @@ TELEGRAM_TOKEN = "8731559080:AAGEeCrhmyG0JHBF2RU8CKnRhg-zwtSlhAQ"
 ARCGIS_URL = "https://services3.arcgis.com/MfVi0khS4tCyLmo3/arcgis/rest/services/Interventi_VVF_Assegnati_-_Ultime_6_ore/FeatureServer/0/query"
 USERS_FILE = "users.json"
 
-# users = {chat_id: {"lat":..., "lon":..., "radius":..., "seen": set()}}
-users = {}
+users = {}  # chat_id -> {lat, lon, radius, seen:set}
 app_ref = None
 
 flask_app = Flask(__name__)
 @flask_app.route('/')
-def home(): return f"Bot VVF MULTI attivo - {len(users)} utenti"
+def home(): return f"Bot VVF MULTI FIXED - {len(users)} utenti attivi"
 def run_flask(): flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 def save_users():
     try:
         data = {str(k): {"lat": v["lat"], "lon": v["lon"], "radius": v["radius"]} for k,v in users.items()}
         with open(USERS_FILE, "w") as f: json.dump(data, f)
-    except: pass
+        print(f"Salvati {len(data)} utenti")
+    except Exception as e: print(f"save err {e}")
 
 def load_users():
     global users
@@ -31,7 +31,8 @@ def load_users():
                 data = json.load(f)
                 for k,v in data.items():
                     users[int(k)] = {"lat": v["lat"], "lon": v["lon"], "radius": v.get("radius",30000), "seen": set()}
-        except: pass
+            print(f"Caricati {len(users)} utenti")
+        except Exception as e: print(f"load err {e}")
 
 def haversine(lat1, lon1, lat2, lon2):
     R=6371000; p1=math.radians(lat1); p2=math.radians(lat2); dlat=math.radians(lat2-lat1); dlon=math.radians(lon2-lon1)
@@ -40,19 +41,29 @@ def haversine(lat1, lon1, lat2, lon2):
 
 def query_arcgis(lat, lon, radius):
     params = {"f":"json","where":"1=1","geometry":f"{lon},{lat}","geometryType":"esriGeometryPoint","inSR":"4326","spatialRel":"esriSpatialRelIntersects","distance":radius,"units":"esriSRUnit_Meter","outFields":"*","returnGeometry":"true","orderByFields":"OBJECTID DESC","resultRecordCount":20}
-    try: return requests.get(ARCGIS_URL, params=params, timeout=20).json().get("features",[])
-    except: return []
+    try:
+        r = requests.get(ARCGIS_URL, params=params, timeout=20)
+        print(f"ArcGIS {lat:.3f},{lon:.3f} r={radius} -> {r.status_code}")
+        return r.json().get("features",[])
+    except Exception as e:
+        print(f"ArcGIS err {e}"); return []
 
 def get_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🏙️ 5km", callback_data="raggio_5"), InlineKeyboardButton("🏘️ 10km", callback_data="raggio_10")],[InlineKeyboardButton("🚗 15km", callback_data="raggio_15"), InlineKeyboardButton("🚒 30km", callback_data="raggio_30")],[InlineKeyboardButton("🗺️ 50km", callback_data="raggio_50"), InlineKeyboardButton("🔇 Stop", callback_data="raggio_stop")]])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏙️ 5km", callback_data="raggio_5"), InlineKeyboardButton("🏘️ 10km", callback_data="raggio_10")],
+        [InlineKeyboardButton("🚗 15km", callback_data="raggio_15"), InlineKeyboardButton("🚒 30km", callback_data="raggio_30")],
+        [InlineKeyboardButton("🗺️ 50km", callback_data="raggio_50"), InlineKeyboardButton("🔇 Stop", callback_data="raggio_stop")],
+        [InlineKeyboardButton("🧪 Test notifica", callback_data="raggio_test")]
+    ])
 
 async def check_all_users():
-    if app_ref is None: return
+    if not app_ref: return
     for chat_id, u in list(users.items()):
         try:
             features = await asyncio.to_thread(query_arcgis, u["lat"], u["lon"], u["radius"])
             if len(u["seen"])==0 and len(features)>1:
                 for f in features: u["seen"].add(f["attributes"].get("OBJECTID"))
+                print(f"Primo avvio per {chat_id}, ignorati {len(features)-1} vecchi")
                 features=features[:1]
             for feat in features:
                 attr=feat.get("attributes",{}); oid=attr.get("OBJECTID")
@@ -67,48 +78,79 @@ async def check_all_users():
                 if sotto: msg+=f" - {sotto}"
                 msg+=f"\n📍 *{comune}* {indir}"
                 if data_str: msg+=f"\n🕐 {data_str}"
-                msg+=f"\n📏 {dist_txt} da te (entro {int(u['radius']/1000)}km)\n\n[📍 APRI MAPS]({maps_url})"
+                msg+=f"\n📏 {dist_txt} da te (entro {int(u['radius']/1000)}km)"
                 kb=InlineKeyboardMarkup([[InlineKeyboardButton("🚨 Naviga con Maps", url=maps_url)]])
                 await app_ref.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown", reply_markup=kb)
-        except Exception as e: print(f"check {chat_id} error {e}")
+                print(f"Inviato {oid} a {chat_id}")
+        except Exception as e: print(f"check {chat_id} err {e}")
 
 async def background_loop():
-    await asyncio.sleep(10)
+    await asyncio.sleep(15)
     while True:
         await check_all_users()
         await asyncio.sleep(90)
 
-async def handle_loc(u,c):
-    chat_id = u.effective_chat.id
-    loc = u.message.location
+async def handle_loc(update, context):
+    chat_id = update.effective_chat.id
+    loc = update.message.location
     if chat_id not in users:
         users[chat_id] = {"lat": loc.latitude, "lon": loc.longitude, "radius": 30000, "seen": set()}
     else:
-        users[chat_id]["lat"] = loc.latitude
-        users[chat_id]["lon"] = loc.longitude
+        users[chat_id]["lat"] = loc.latitude; users[chat_id]["lon"] = loc.longitude
     save_users()
-    is_live="LIVE 🔴" if u.message.location.live_period else "fissa 📍"
-    await u.message.reply_text(f"✅ Posizione {is_live} salvata SOLO per te!\n📍 {loc.latitude:.5f}, {loc.longitude:.5f}\nRaggio: {int(users[chat_id]['radius']/1000)}km\n\nOra ricevi allarmi personalizzati. Puoi dare il bot anche ai tuoi amici, ognuno avrà i suoi!", reply_markup=get_keyboard())
+    is_live="LIVE 🔴" if update.message.location.live_period else "fissa 📍"
+    print(f"Loc {chat_id} -> {loc.latitude},{loc.longitude}")
+    await update.message.reply_text(f"✅ Posizione {is_live} salvata per TE!\n📍 {loc.latitude:.5f}, {loc.longitude:.5f}\nRaggio: {int(users[chat_id]['radius']/1000)}km\n\nUsa i pulsanti qui sotto per cambiare raggio o fare un test.", reply_markup=get_keyboard())
 
-async def start_cmd(u,c):
-    chat_id = u.effective_chat.id
+async def start_cmd(update, context):
+    chat_id = update.effective_chat.id
     if chat_id in users:
-        stato=f"✅ Attiva - {users[chat_id]['lat']:.4f}, {users[chat_id]['lon']:.4f} ({int(users[chat_id]['radius']/1000)}km)"
+        stato=f"✅ Attiva - {users[chat_id]['lat']:.4f},{users[chat_id]['lon']:.4f} ({int(users[chat_id]['radius']/1000)}km) - {len(users[chat_id]['seen'])} già visti"
     else:
-        stato="⚠️ Non hai ancora inviato la posizione"
-    await u.message.reply_text(f"🚒 *Bot VVF MULTI-UTENTE*\n\n{stato}\n\n📎 Invia posizione LIVE 8h per ricevere allarmi vicino a te.\nOgnuno che usa questo bot ha i suoi allarmi privati!", parse_mode="Markdown", reply_markup=get_keyboard())
+        stato="⚠️ Non hai ancora inviato la posizione - premi 📎 -> Posizione -> Live 8h"
+    await update.message.reply_text(f"🚒 *Bot VVF MULTI FIXED*\n\n{stato}\n\nComandi:\n/start - stato\n/test - prova notifica finta\n/stato - debug", parse_mode="Markdown", reply_markup=get_keyboard())
 
-async def raggio_cb(u,c):
-    q=u.callback_query; await q.answer(); chat_id=q.message.chat.id
-    if q.data=="raggio_stop":
+async def stato_cmd(update, context):
+    chat_id = update.effective_chat.id
+    u = users.get(chat_id)
+    if not u: await update.message.reply_text("Non sei registrato. Invia posizione Live."); return
+    features = await asyncio.to_thread(query_arcgis, u["lat"], u["lon"], u["radius"])
+    await update.message.reply_text(f"📊 *Debug*\nUtenti totali: {len(users)}\nTu: {u['lat']:.4f},{u['lon']:.4f} raggio {int(u['radius']/1000)}km\nInterventi nelle ultime 6h vicino a te: {len(features)}\nVisti: {len(u['seen'])}", parse_mode="Markdown")
+
+async def test_cmd(update, context):
+    chat_id = update.effective_chat.id
+    u = users.get(chat_id)
+    if not u: await update.message.reply_text("Prima invia la posizione!"); return
+    maps_url=f"https://www.google.com/maps/search/?api=1&query={u['lat']+0.005},{u['lon']+0.005}"
+    msg=f"🧪 *TEST NOTIFICA* 🚒\n\n📋 *Incendio* - Sterpaglie (FAKE TEST)\n📍 *Barge* Via Test 123\n🕐 Test del {u['lat']:.3f}\n📏 0.5km da te (entro {int(u['radius']/1000)}km)\n\nSe leggi questo, le notifiche FUNZIONANO! I pulsanti raggio funzionano!"
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("🚨 Naviga con Maps", url=maps_url)]])
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
+
+async def raggio_cb(update, context):
+    q=update.callback_query
+    await q.answer(text="Aggiorno...")
+    chat_id = update.effective_chat.id
+    data = q.data
+    print(f"Callback {chat_id} -> {data}")
+    if data == "raggio_test":
+        await test_cmd(update, context)
+        return
+    if data == "raggio_stop":
         if chat_id in users: del users[chat_id]; save_users()
-        await q.edit_message_text("🔇 Allarmi disattivati per te. Invia di nuovo la posizione per riattivare.")
+        await q.edit_message_text("🔇 Allarmi disattivati. Invia di nuovo la posizione per riattivare.")
         return
     if chat_id not in users:
         await q.edit_message_text("Prima invia la posizione! 📎 -> Posizione -> Live 8h")
         return
-    km=int(q.data.split("_")[1]); users[chat_id]["radius"]=km*1000; save_users()
-    await q.edit_message_text(f"✅ Raggio tuo impostato a {km}km", reply_markup=get_keyboard())
+    try:
+        km=int(data.split("_")[1])
+        users[chat_id]["radius"]=km*1000
+        save_users()
+        await q.edit_message_text(f"✅ Raggio impostato a {km}km per te!\nPos: {users[chat_id]['lat']:.4f},{users[chat_id]['lon']:.4f}", reply_markup=get_keyboard())
+        print(f"Raggio {chat_id} -> {km}km")
+    except Exception as e:
+        print(f"raggio err {e}")
+        await q.edit_message_text(f"Errore: {e}", reply_markup=get_keyboard())
 
 async def post_init(app):
     global app_ref; app_ref=app; asyncio.create_task(background_loop())
@@ -119,9 +161,11 @@ def main():
     threading.Thread(target=run_flask, daemon=True).start()
     app=ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("test", test_cmd))
+    app.add_handler(CommandHandler("stato", stato_cmd))
     app.add_handler(CallbackQueryHandler(raggio_cb, pattern="^raggio_"))
     app.add_handler(MessageHandler(filters.LOCATION, handle_loc))
-    print(f"Avviato MULTI - {len(users)} utenti")
+    print(f"Avviato MULTI FIXED - {len(users)} utenti")
     app.run_polling()
 
 if __name__=="__main__": main()
