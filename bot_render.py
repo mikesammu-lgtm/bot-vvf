@@ -6,7 +6,6 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 
 TELEGRAM_TOKEN = "8731559080:AAEQL5ZzYj_mzlpqxABcHH5MyZ0n1mTQqw8"
 ARCGIS_URL = "https://services3.arcgis.com/MfVi0khS4tCyLmo3/arcgis/rest/services/Interventi_VVF_Assegnati_-_Ultime_6_ore/FeatureServer/0/query"
-TOKEN_URL = "https://www.arcgis.com/sharing/rest/generateToken"
 USERS_FILE = "users.json"
 
 users = {}
@@ -14,17 +13,14 @@ app_ref = None
 arcgis_token = None
 arcgis_token_exp = 0
 
-# Silenzia il WARNING Flask
 log = logging.getLogger('werkzeug')
 log.disabled = True
-os.environ['PYTHONWARNINGS'] = 'ignore'
 
 flask_app = Flask(__name__)
 @flask_app.route('/')
 def home():
-    u = os.environ.get("ARCGIS_USER")
-    status = "CON CREDENZIALI" if u else "SENZA CREDENZIALI"
-    return f"Bot VVF V8 {status} - {len(users)} utenti - User:{u}"
+    u = os.environ.get("ARCGIS_USER", "non impostato")
+    return f"Bot VVF V8.1 SERVER - {len(users)} utenti - User:{u}"
 
 def run_flask():
     flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
@@ -68,33 +64,42 @@ def get_arcgis_token():
     password = os.environ.get("ARCGIS_PASS")
     
     if not username or not password:
-        print("ERRORE: ARCGIS_USER / ARCGIS_PASS non impostate su Render!")
+        print("ERRORE: ARCGIS_USER / ARCGIS_PASS non impostate!")
         return None
     
-    print(f"Tento login ArcGIS con user={username[:4]}***")
-    try:
-        data = {
-            "f": "json",
-            "username": username,
-            "password": password,
-            "referer": "https://www.arcgis.com",
-            "expiration": "120"
-        }
-        r = requests.post(TOKEN_URL, data=data, timeout=15)
-        print(f"TOKEN login status={r.status_code}")
-        print(f"TOKEN login body={r.text[:1000]}")
-        j = r.json()
-        if "error" in j:
-            print(f"TOKEN login ERROR={j['error']}")
-            return None
-        tok = j.get("token")
-        if tok:
-            arcgis_token = tok
-            arcgis_token_exp = time.time() + 110*60
-            print(f"TOKEN OK! len={len(tok)} scade tra 110 min")
-            return tok
-    except Exception as e:
-        print(f"get token err {e}")
+    # 3 endpoint diversi, prova tutti
+    endpoints = [
+        ("SERVER tokens", "https://services3.arcgis.com/MfVi0khS4tCyLmo3/arcgis/tokens/generateToken"),
+        ("SERVER rest", "https://services3.arcgis.com/MfVi0khS4tCyLmo3/arcgis/rest/generateToken"),
+        ("AGOL", "https://www.arcgis.com/sharing/rest/generateToken")
+    ]
+    
+    for name, url in endpoints:
+        try:
+            print(f"Provo {name} -> {url} con user={username}")
+            data = {
+                "f": "json",
+                "username": username,
+                "password": password,
+                "client": "referer",
+                "referer": "https://www.arcgis.com",
+                "expiration": "120",
+                "format": "json"
+            }
+            r = requests.post(url, data=data, timeout=15)
+            print(f"{name} status={r.status_code} body={r.text[:1500]}")
+            j = r.json()
+            if "token" in j and j["token"]:
+                arcgis_token = j["token"]
+                arcgis_token_exp = time.time() + 110*60
+                print(f"{name} OK! token len={len(arcgis_token)}")
+                return arcgis_token
+            if "error" in j:
+                print(f"{name} ERROR={j['error']}")
+        except Exception as e:
+            print(f"{name} exception {e}")
+    
+    print("Tutti gli endpoint token falliti")
     return None
 
 def query_all():
@@ -102,16 +107,11 @@ def query_all():
     params = {"f":"json","where":"1=1","outFields":"*","returnGeometry":"true","orderByFields":"OBJECTID DESC","resultRecordCount":100}
     if tok:
         params["token"] = tok
-    else:
-        print("Nessun token, query fallira' con 499")
-        
     try:
         r = requests.get(ARCGIS_URL, params=params, timeout=20)
-        print(f"ArcGIS status={r.status_code} len={len(r.text)}")
-        print(f"ArcGIS preview={r.text[:800]}")
+        print(f"ArcGIS query status={r.status_code} len={len(r.text)} preview={r.text[:1000]}")
         j = r.json()
         if "error" in j:
-            print(f"ArcGIS ERROR={j['error']}")
             return [], r.status_code, j["error"]
         feats = j.get("features",[])
         print(f"ArcGIS ALL -> {len(feats)} interventi")
@@ -194,30 +194,20 @@ async def handle_loc(update, context):
         await msg.reply_text(f"✅ LIVE salvata! raggio {int(users[chat_id]['radius']/1000)}km", reply_markup=get_keyboard())
 
 async def stato_cmd(update, context):
-    u=users.get(update.effective_chat.id)
-    if not u:
-        await update.message.reply_text("Non registrato. Invia posizione Live.")
-        return
     result = await asyncio.to_thread(query_all)
     feats, status, err = result
-    
-    username = os.environ.get("ARCGIS_USER")
-    if err and "Token Required" in str(err):
-        if not username:
-            txt="❌ ERRORE 499 Token Required\n\nLe variabili ARCGIS_USER e ARCGIS_PASS non sono impostate su Render! Vai su Environment e aggiungile."
-        else:
-            txt=f"❌ ERRORE 499 anche con credenziali {username}\n\nLa password è sbagliata o l'utente non ha i permessi per questo FeatureServer.\nHTTP: {status}\n{err}"
+    username = os.environ.get("ARCGIS_USER", "???")
+    if err:
+        txt=f"❌ ERRORE 499 anche con credenziali {username}\n\nHTTP: {status}\n{err}\n\nControlla i LOG su Render per vedere il dettaglio del login."
     else:
-        txt=f"✅ DEBUG V8\nUser: {username}\nHTTP: {status}\nTot Piemonte 6h: {len(feats)}\nEntro {int(u['radius']/1000)}km: da calcolare"
+        txt=f"✅ V8.1 OK! User: {username}\nTot Piemonte 6h: {len(feats)}\nHTTP: {status}"
         if feats:
-            f=feats[0]
-            attr=f.get("attributes",{})
-            txt+=f"\nUltimo: {attr.get('COMUNE')} {attr.get('TIPOLOGIA')}"
-    
+            a=feats[0].get("attributes",{})
+            txt+=f"\nUltimo: {a.get('COMUNE')} {a.get('TIPOLOGIA')}"
     await update.message.reply_text(txt)
 
 async def start_cmd(update, context):
-    await update.message.reply_text("🤖 Bot VVF V8 con credenziali - /stato per debug", reply_markup=get_keyboard())
+    await update.message.reply_text("🤖 Bot VVF V8.1 SERVER - /stato per debug", reply_markup=get_keyboard())
 
 async def vicini_cmd(update, context):
     chat_id=update.effective_chat.id
@@ -226,10 +216,9 @@ async def vicini_cmd(update, context):
         await update.message.reply_text("Prima manda la Live!")
         return
     result = await asyncio.to_thread(query_all)
-    feats = result[0]
-    err = result[2]
+    feats, status, err = result
     if err:
-        await update.message.reply_text(f"Errore sorgente: {err}")
+        await update.message.reply_text(f"Errore: {err}")
         return
     vicini=[]
     for feat in feats:
@@ -242,7 +231,7 @@ async def vicini_cmd(update, context):
             vicini.append((dist, feat))
     vicini.sort(key=lambda x: x[0])
     if not vicini:
-        await update.message.reply_text(f"👀 Nessun intervento entro {int(u['radius']/1000)}km ultime 6h.\nTot Piemonte: {len(feats)}")
+        await update.message.reply_text(f"👀 Nessun intervento entro {int(u['radius']/1000)}km. Tot Piemonte: {len(feats)}")
     else:
         txt=f"👀 {len(vicini)} vicini su {len(feats)} totali:\n"
         for d,f in vicini[:5]:
@@ -262,7 +251,7 @@ async def raggio_cb(update, context):
         if chat_id in users:
             del users[chat_id]
             save_users()
-        await q.edit_message_text("🛑 Stop, non riceverai più allarmi")
+        await q.edit_message_text("🛑 Stop")
         return
     if data=="raggio_test":
         await q.edit_message_text("Test token in corso...")
@@ -271,7 +260,7 @@ async def raggio_cb(update, context):
         if err:
             await q.edit_message_text(f"❌ Errore: {err}", reply_markup=get_keyboard())
         else:
-            await q.edit_message_text(f"✅ OK! Tot Piemonte: {len(feats)}", reply_markup=get_keyboard())
+            await q.edit_message_text(f"✅ OK! Tot: {len(feats)}", reply_markup=get_keyboard())
         return
     if data=="raggio_vicini":
         await vicini_cmd(update, context)
@@ -284,7 +273,7 @@ async def raggio_cb(update, context):
             km=int(data.split("_")[1])
             users[chat_id]["radius"]=km*1000
             save_users()
-            await q.edit_message_text(f"✅ Raggio impostato a {km}km!", reply_markup=get_keyboard())
+            await q.edit_message_text(f"✅ Raggio {km}km!", reply_markup=get_keyboard())
         except:
             pass
 
@@ -310,7 +299,7 @@ def main():
     app.add_handler(MessageHandler(filters.LOCATION, handle_loc))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.LOCATION, handle_loc))
     app.add_handler(CallbackQueryHandler(raggio_cb, pattern="^raggio_"))
-    print(f"Avviato V8 CREDS - {len(users)} utenti token {TELEGRAM_TOKEN[:6]}...")
+    print(f"Avviato V8.1 SERVER - {len(users)} utenti token {TELEGRAM_TOKEN[:6]}...")
     app.run_polling(drop_pending_updates=True, allowed_updates=["message","edited_message","callback_query"])
 
 if __name__=="__main__":
